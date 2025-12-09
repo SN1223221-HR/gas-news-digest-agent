@@ -1,32 +1,33 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <base target="_blank">
-    <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@300;400;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
-    <?!= include('SidebarCSS'); ?>
-  </head>
-  <body>
-
-    <div class="header-container">
-      <div class="header">
-        <h1>📰 Daily Briefing</h1>
-        <div class="subtitle" id="date-display">Thinking Time</div>
-      </div>
-
-      <div class="controls">
-        <select id="keyword-filter" onchange="renderFeed()">
-          <option value="ALL">All Topics</option>
-        </select>
-      </div>
+<head>
+  <base target="_blank">
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@300;400;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  <?!= include('SidebarCSS'); ?>
+</head>
+<body>
+  <div class="header-container">
+    <div class="header">
+      <h1>📰 News Workspace</h1>
+      <div class="subtitle">Campaign & Knowledge Base</div>
+    </div>
+    
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('inbox')">Inbox</div>
+      <div class="tab" onclick="switchTab('archive')">Archive (Read)</div>
     </div>
 
-    <div id="feed-container" class="scroll-area">
-      <div class="loading">
-        <div class="spinner"></div>
-        Fetching news...
-      </div>
+    <div class="controls">
+      <select id="keyword-filter" onchange="renderFeed()">
+        <option value="ALL">All Topics</option>
+      </select>
     </div>
+  </div>
 
-    <?!= include('SidebarJS'); ?>
-  </body>
+  <div id="feed-container" class="scroll-area">
+    <div class="loading"><div class="spinner"></div>Loading...</div>
+  </div>
+
+  <?!= include('SidebarJS'); ?>
+</body>
 </html>
