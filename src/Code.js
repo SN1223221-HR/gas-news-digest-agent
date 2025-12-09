@@ -1,42 +1,19 @@
 /**
  * ==================================================
  * Enterprise News Aggregator for GAS
- * Version: 4.0.0 (Personalization Edition)
+ * Version: 6.0.0 (Ultimate Edition)
  * ==================================================
  */
 
-// ==================================================
-//  Global Config
-// ==================================================
-
-const NEWS_AGENT = Object.freeze({
-  NAME: 'News Agent Pro',
-  VERSION: '4.0.0'
-});
+const NEWS_AGENT = Object.freeze({ NAME: 'News Agent Pro', VERSION: '6.0.0' });
 
 const CONFIG = Object.freeze({
-  SHEET_NAMES: Object.freeze({
-    CONFIG: 'Config',
-    DB: 'DB',
-    LOGS: 'Logs'
-  }),
-  CACHE: Object.freeze({
-    TTL_SECONDS: 21600, // 6h
-    PREFIX: 'news_url_'
-  }),
-  RETRY: Object.freeze({
-    MAX_ATTEMPTS: 3,
-    BASE_DELAY_MS: 1000
-  }),
-  UI: Object.freeze({
-    TOAST_SECONDS: 3
-  }),
-  LOCK: Object.freeze({
-    ACQUIRE_TIMEOUT_MS: 30000
-  }),
-  LOG: Object.freeze({
-    MAX_ROWS: 2000
-  }),
+  SHEET_NAMES: Object.freeze({ CONFIG: 'Config', DB: 'DB', LOGS: 'Logs' }),
+  CACHE: Object.freeze({ TTL_SECONDS: 21600, PREFIX: 'news_url_' }),
+  RETRY: Object.freeze({ MAX_ATTEMPTS: 3, BASE_DELAY_MS: 1000 }),
+  UI: Object.freeze({ TOAST_SECONDS: 3 }),
+  LOCK: Object.freeze({ ACQUIRE_TIMEOUT_MS: 30000 }),
+  LOG: Object.freeze({ MAX_ROWS: 2000 }),
   DB_COLUMNS: Object.freeze({
     // 1-based index
     TIMESTAMP: 1,
@@ -46,7 +23,11 @@ const CONFIG = Object.freeze({
     DATE: 5,
     SOURCE: 6,
     SENT_FLAG: 7,
-    RATING: 8, // ★追加: 評価(1-5)
+    RATING: 8,
+    COMMENT: 9,
+    IS_READ: 10,
+    CAMPAIGN_TAG: 11,
+    SUMMARY: 12, // ★AI要約用に追加
     FIRST_DATA_ROW: 2
   })
 });
@@ -56,10 +37,9 @@ const CONFIG = Object.freeze({
 // ==================================================
 
 function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('⚡ News Agent')
+  SpreadsheetApp.getUi().createMenu('⚡ News Agent')
     .addItem('📰 ニュースリーダー (Sidebar)', 'showNewsSidebar')
-    .addItem('📊 トレンド・評価分析 (Analytics)', 'showAnalyticsDialog')
+    .addItem('📊 分析 (Analytics)', 'showAnalyticsDialog')
     .addSeparator()
     .addItem('📥 今すぐ収集 (Crawl)', 'manualCrawl')
     .addItem('📮 今すぐ配信 (Send Mail)', 'manualSend')
@@ -80,7 +60,7 @@ function showAnalyticsDialog() {
     .setWidth(900)
     .setHeight(700)
     .setSandboxMode(HtmlService.SandboxMode.IFRAME);
-  SpreadsheetApp.getUi().showModalDialog(html, '📊 Trend & Domain Analytics');
+  SpreadsheetApp.getUi().showModalDialog(html, '📊 Analytics Dashboard');
 }
 
 function include(filename) {
@@ -88,108 +68,77 @@ function include(filename) {
 }
 
 // ==================================================
-//  API for Sidebar (Rating)
+//  Client APIs (Sidebar & AI Hooks)
 // ==================================================
 
 /**
- * 記事の評価を更新する
- * @param {string} link - ユニークキー代わり
- * @param {number} rating - 1 to 5
+ * 記事のステータス更新 (評価/コメント/既読/要約)
+ * Slack連携やAI要約保存もここで行う
  */
-function updateArticleRating(link, rating) {
+function updateArticleStatus(link, data) {
   const repo = new SheetRepository();
-  repo.updateRating(link, rating);
+  repo.updateStatus(link, data); 
+
+  // ★Slack連携: 評価が4以上の時に通知
+  if (data.rating && data.rating >= 4) {
+    try {
+      const conf = repo.loadConfig();
+      if (conf.SlackWebhookUrl) {
+        // 記事タイトル等の詳細は今回は省略(リンクのみ通知)
+        // 厳密にやるならDBから記事情報を引く
+        const slack = new SlackService(conf.SlackWebhookUrl);
+        slack.postMessage({ 
+          title: 'Article Rated High', 
+          link: link, 
+          source: 'News Agent', 
+          rating: data.rating,
+          comment: data.comment 
+        }, 'High Rating Alert ★' + data.rating);
+      }
+    } catch(e) {
+      console.warn('Slack Post Failed', e);
+    }
+  }
+
   return { success: true };
 }
 
 /**
- * サイドバー用データ取得 (評価付き)
+ * サイドバー用データ取得
  */
 function getNewsFeedData() {
   const repo = new SheetRepository();
   const sheet = repo.dbSheet;
   const lastRow = sheet.getLastRow();
-  
   if (lastRow < 2) return JSON.stringify([]);
 
-  const limit = 100;
+  // 直近200件取得 (全12カラム)
+  const limit = 200;
   const startRow = Math.max(2, lastRow - limit + 1);
-  const numRows = lastRow - startRow + 1;
+  const values = sheet.getRange(startRow, 1, lastRow - startRow + 1, 12).getValues();
 
-  // 8列(Rating)まで取得
-  const values = sheet.getRange(startRow, 1, numRows, 8).getValues();
-  
-  const feed = values.map(function(r) {
-    return {
-      timestamp: r[0],
-      keyword: r[1],
-      title: r[2],
-      link: r[3],
-      date: r[4],
-      source: r[5],
-      rating: r[7] // Column 8 is index 7
-    };
-  }).reverse();
+  const feed = values.map(r => ({
+    timestamp: r[0], keyword: r[1], title: r[2], link: r[3], date: r[4], source: r[5],
+    rating: r[7], comment: r[8], isRead: r[9], campaignTag: r[10], summary: r[11]
+  })).reverse();
 
   return JSON.stringify(feed);
 }
 
-// ==================================================
-//  Domain Filtering Logic
-// ==================================================
-
-class DomainReputationService {
-  constructor(repo) {
-    this.repo = repo;
-    // 過去の全データからドメインごとの平均スコアを計算（重い処理なのでキャッシュすべきだが今回は簡易実装）
-    this.stats = this._calculateStats();
-  }
-
-  /**
-   * ドメインが「ブロック対象（低評価）」か判定
-   * 基準: 評価数が2件以上 かつ 平均評価が 2.0 未満
-   */
-  isBlocked(url) {
-    const domain = this._extractDomain(url);
-    if (!domain) return false;
-    
-    const stat = this.stats[domain];
-    if (!stat) return false;
-
-    // Strict Rule: 2回以上評価されていて、平均が2.0未満ならブロック
-    if (stat.count >= 2 && (stat.sum / stat.count) < 2.0) {
-      console.log(`[Blocked] Domain: ${domain}, Avg: ${(stat.sum / stat.count).toFixed(1)}`);
-      return true;
-    }
-    return false;
-  }
-
-  _calculateStats() {
-    const data = this.repo.getAllRatings(); // [[link, rating], ...]
-    const stats = {}; // { "example.com": { sum: 10, count: 3 } }
-
-    data.forEach(row => {
-      const link = row[0];
-      const rating = row[1];
-      if (link && rating) {
-        const domain = this._extractDomain(link);
-        if (domain) {
-          if (!stats[domain]) stats[domain] = { sum: 0, count: 0 };
-          stats[domain].sum += Number(rating);
-          stats[domain].count += 1;
-        }
-      }
-    });
-    return stats;
-  }
-
-  _extractDomain(url) {
-    try {
-      return new URL(url).hostname;
-    } catch (e) {
-      return null;
-    }
-  }
+/**
+ * [AI] 記事要約を実行
+ */
+function fetchSummary(link, title) {
+  const repo = new SheetRepository();
+  const ai = new AIService(repo);
+  
+  // AIに要約させる
+  const summary = ai.summarize(`タイトル: ${title}\nURL: ${link}`);
+  
+  // 結果を保存
+  repo.updateStatus(link, { summary: summary });
+  
+  return summary;
 }
 
 // ==================================================
@@ -197,10 +146,9 @@ class DomainReputationService {
 // ==================================================
 
 function manualCrawl() {
-  SpreadsheetApp.getActiveSpreadsheet().toast('収集を開始します...', NEWS_AGENT.NAME);
   executeSafely('Manual Crawl', app => {
     const count = app.crawl();
-    SpreadsheetApp.getActiveSpreadsheet().toast(`収集完了: ${count}件 (低評価サイトは除外済)`, NEWS_AGENT.NAME);
+    SpreadsheetApp.getActiveSpreadsheet().toast(`収集完了: ${count}件`, NEWS_AGENT.NAME);
   });
 }
 
@@ -208,99 +156,118 @@ function manualSend() {
   executeSafely('Manual Send', app => app.forceSendMail());
 }
 
-function cleanupLogs() { const logger = new LoggerService(); logger.trimOldRows(CONFIG.LOG.MAX_ROWS); }
-function testConnection() { /* 省略（既存のままでOK） */ }
-
 function executeSafely(context, taskFunction) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(CONFIG.LOCK.ACQUIRE_TIMEOUT_MS)) return;
   try {
-    const app = new NewsApp();
+    const logger = new LoggerService();
+    const app = new NewsApp(logger);
     taskFunction(app);
-  } catch (e) {
-    console.error(e);
-  } finally {
-    lock.releaseLock();
-  }
+  } catch (e) { console.error(e); } finally { lock.releaseLock(); }
 }
 
 // ==================================================
-//  Application Classes
+//  News Application Class
 // ==================================================
 
 class NewsApp {
-  constructor() {
+  constructor(logger) {
     this.repo = new SheetRepository();
-    this.logger = new LoggerService();
+    this.logger = logger || new LoggerService();
     this.rss = new RssService();
-    this.mailer = new MailService();
-    this.reputation = new DomainReputationService(this.repo); // 評判システム
+    this.mailer = new MailService(this.logger);
+    // CampaignManagerが存在しない場合のエラー回避 (別途ファイルが必要)
+    try {
+      this.campaign = new CampaignManager(this.repo, this.logger);
+    } catch (e) {
+      this.campaign = null;
+      console.warn('CampaignManager not found. Campaign features disabled.');
+    }
   }
 
   crawl() {
+    // 1. 通常キーワード
     const settings = this.repo.loadConfig();
-    const keywords = this.repo.getKeywords();
-    if (keywords.length === 0) return 0;
-
-    const regions = parseRegionList(settings.Region, ['JP']);
+    const normalKeywords = this.repo.getKeywords();
+    const regions = (settings.Region || 'JP').split(',');
     const lang = settings.Language || 'ja';
-    let totalNewArticles = 0;
+    
+    let newItems = [];
     const urlCache = new UrlCacheService(this.repo);
 
-    keywords.forEach(keyword => {
+    this._fetchKeywords(normalKeywords, regions, lang, urlCache, newItems, '');
+
+    // 2. キャンペーンキーワード
+    if (this.campaign) {
+      const activeCampaigns = this.campaign.getActiveCampaigns();
+      activeCampaigns.forEach(camp => {
+        this._fetchKeywords(camp.keywords, regions, lang, urlCache, newItems, camp.name);
+      });
+    }
+
+    if (newItems.length > 0) {
+      this.repo.saveArticles(newItems);
+    }
+    return newItems.length;
+  }
+
+  _fetchKeywords(keywords, regions, lang, cache, resultList, campaignTag) {
+    keywords.forEach(kw => {
       regions.forEach(region => {
         try {
-          const items = this.rss.fetch(keyword, region, lang);
-          const newItems = [];
-          
+          const items = this.rss.fetch(kw.trim(), region.trim(), lang);
           items.forEach(item => {
-            // 重複チェック AND ドメイン評判チェック
-            if (!urlCache.exists(item.link)) {
-              if (!this.reputation.isBlocked(item.link)) {
-                item.keyword = keyword;
-                newItems.push(item);
-                urlCache.add(item.link);
-              }
+            if (!cache.exists(item.link)) {
+              item.keyword = kw;
+              item.campaignTag = campaignTag;
+              resultList.push(item);
+              cache.add(item.link);
             }
           });
-
-          if (newItems.length > 0) {
-            this.repo.saveArticles(newItems);
-            totalNewArticles += newItems.length;
-          }
           Utilities.sleep(1000);
-        } catch (e) {
-          this.logger.error('Crawl Error', e.message);
-        }
+        } catch(e) {}
       });
     });
-    return totalNewArticles;
   }
 
   forceSendMail() {
-    const settings = this.repo.loadConfig();
     const unsent = this.repo.getUnsentArticles();
     if (unsent.length === 0) return 0;
-    this.mailer.sendDailyReport(unsent, settings);
-    this.repo.markAsSent(unsent);
+
+    let campaignSentIndices = new Set();
+    
+    // 1. キャンペーンメール
+    if (this.campaign) {
+      campaignSentIndices = this.campaign.processCampaignEmails(unsent);
+    }
+
+    // 2. 通常メール
+    const normalUnsent = unsent.filter(a => !campaignSentIndices.has(a.rowIndex));
+    if (normalUnsent.length > 0) {
+      const settings = this.repo.loadConfig();
+      this.mailer.sendDailyReport(normalUnsent, settings);
+      this.repo.markAsSent(normalUnsent);
+    }
     return unsent.length;
   }
 }
 
+// ==================================================
+//  Repository Class (Fixed & Enhanced)
+// ==================================================
+
 class SheetRepository {
   constructor() {
     this.ss = SpreadsheetApp.getActiveSpreadsheet();
-    this.dbSheet = this.ss.getSheetByName(CONFIG.SHEET_NAMES.DB) || this.ss.insertSheet(CONFIG.SHEET_NAMES.DB);
-    this.configSheet = this.ss.getSheetByName(CONFIG.SHEET_NAMES.CONFIG);
+    this.dbSheet = this.ss.getSheetByName('DB') || this.ss.insertSheet('DB');
+    this.configSheet = this.ss.getSheetByName('Config');
   }
 
-  loadConfig() {
+  loadConfig() { 
     const data = this.configSheet.getDataRange().getValues();
-    const result = {};
-    for(let i=1; i<data.length; i++) {
-      if(data[i][2]) result[String(data[i][2])] = data[i][3];
-    }
-    return result;
+    const res = {};
+    for(let i=1;i<data.length;i++) if(data[i][2]) res[String(data[i][2])] = data[i][3];
+    return res;
   }
 
   getKeywords() {
@@ -308,95 +275,103 @@ class SheetRepository {
     return last < 2 ? [] : this.configSheet.getRange(2, 1, last-1, 1).getValues().flat().filter(String);
   }
 
-  getAllUrls() {
-    const last = this.dbSheet.getLastRow();
-    if(last < 2) return new Set();
-    const limit = 3000; // チェック範囲拡大
-    const start = Math.max(2, last - limit + 1);
-    const values = this.dbSheet.getRange(start, CONFIG.DB_COLUMNS.LINK, last-start+1, 1).getValues();
-    const s = new Set();
-    values.forEach(v => { if(v[0]) s.add(String(v[0])); });
-    return s;
-  }
-
-  // ドメイン分析用にURLとRatingのペアを取得
+  // ★エラーの原因だったメソッドを復活
   getAllRatings() {
     const last = this.dbSheet.getLastRow();
-    if(last < 2) return [];
-    // URLとRating列を取得
-    return this.dbSheet.getRange(2, CONFIG.DB_COLUMNS.LINK, last-1, CONFIG.DB_COLUMNS.RATING - CONFIG.DB_COLUMNS.LINK + 1).getValues()
-      .map(row => [row[0], row[row.length-1]]); // [Link, Rating]
+    if (last < 2) return [];
+    // Link(4) と Rating(8) を含む範囲を取得
+    // 取得範囲: 2行目, 4列目(Link) から最後まで、列数は Rating(8) - Link(4) + 1 = 5列分
+    const data = this.dbSheet.getRange(2, CONFIG.DB_COLUMNS.LINK, last - 1, 5).getValues();
+    
+    // [Link, Date, Source, Sent, Rating] の形になるので、LinkとRatingを抽出
+    return data.map(row => [row[0], row[4]]); // [Link, Rating]
   }
 
   saveArticles(articles) {
-    if (!articles || articles.length === 0) return;
+    if (!articles.length) return;
     const now = new Date();
+    // 12カラム分 (Summary含む)
     const rows = articles.map(a => [
-      now, a.keyword, a.title, a.link, a.date, a.source, false, '' // Rating初期値は空
+      now, a.keyword, a.title, a.link, a.date, a.source, false, 
+      '', '', false, a.campaignTag || '', '' 
     ]);
     const start = this.dbSheet.getLastRow() + 1;
-    this.dbSheet.getRange(start, 1, rows.length, rows[0].length).setValues(rows);
+    this.dbSheet.getRange(start, 1, rows.length, 12).setValues(rows);
   }
 
-  updateRating(targetLink, rating) {
+  updateStatus(link, data) {
+    // 直近500件から検索
     const last = this.dbSheet.getLastRow();
-    if(last < 2) return;
-    // NOTE: パフォーマンスのため直近500件から検索（古すぎる記事への評価は無視）
-    const limit = 500;
-    const start = Math.max(2, last - limit + 1);
-    const links = this.dbSheet.getRange(start, CONFIG.DB_COLUMNS.LINK, last-start+1, 1).getValues().flat();
+    const start = Math.max(2, last - 500);
+    const links = this.dbSheet.getRange(start, 4, last - start + 1, 1).getValues().flat();
+    const idx = links.indexOf(link);
     
-    const index = links.indexOf(targetLink);
-    if (index !== -1) {
-      const rowIndex = start + index;
-      this.dbSheet.getRange(rowIndex, CONFIG.DB_COLUMNS.RATING).setValue(rating);
+    if (idx !== -1) {
+      const row = start + idx;
+      if (data.rating !== undefined) this.dbSheet.getRange(row, 8).setValue(data.rating);
+      if (data.comment !== undefined) this.dbSheet.getRange(row, 9).setValue(data.comment);
+      if (data.isRead !== undefined) this.dbSheet.getRange(row, 10).setValue(data.isRead);
+      if (data.summary !== undefined) this.dbSheet.getRange(row, 12).setValue(data.summary); // ★AI要約
     }
   }
 
   getUnsentArticles() {
     const last = this.dbSheet.getLastRow();
-    if(last < 2) return [];
-    const data = this.dbSheet.getRange(2, 1, last-1, CONFIG.DB_COLUMNS.SENT_FLAG).getValues();
+    if (last < 2) return [];
+    const data = this.dbSheet.getRange(2, 1, last - 1, 11).getValues();
     const rows = [];
     data.forEach((r, i) => {
-      if(!r[6]) rows.push({ rowIndex: i + 2, title: r[2], link: r[3], source: r[5] });
+      if (!r[6]) { 
+        rows.push({
+          rowIndex: i + 2, timestamp: r[0], keyword: r[1], title: r[2], link: r[3],
+          date: r[4], source: r[5], campaignTag: r[10]
+        });
+      }
     });
     return rows;
   }
-
+  
   markAsSent(articles) {
-    const sheet = this.dbSheet;
-    articles.forEach(a => sheet.getRange(a.rowIndex, CONFIG.DB_COLUMNS.SENT_FLAG).setValue(true));
+    articles.forEach(a => this.dbSheet.getRange(a.rowIndex, 7).setValue(true));
   }
 }
 
-// --- 以下、Logger, UrlCache, RssService, MailService は簡易版（変更なしだが動作に必要） ---
+// ==================================================
+//  Helper Services (Logger, Cache, RSS, Mail)
+// ==================================================
+
 class LoggerService {
-  constructor() { this.sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAMES.LOGS) || SpreadsheetApp.getActiveSpreadsheet().insertSheet(CONFIG.SHEET_NAMES.LOGS); }
-  error(c, m) { this.sheet.appendRow([new Date(), 'ERROR', c, m]); }
-  trimOldRows(k) { if(this.sheet.getLastRow() > k) this.sheet.deleteRows(2, this.sheet.getLastRow()-k); }
+  constructor() { this.sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Logs') || SpreadsheetApp.getActiveSpreadsheet().insertSheet('Logs'); }
+  info(c,m){this.sheet.appendRow([new Date(), 'INFO', c, m]);}
+  error(c,m){this.sheet.appendRow([new Date(), 'ERROR', c, m]);}
 }
 class UrlCacheService {
-  constructor(r) { this.cache = CacheService.getScriptCache(); this.mem = r.getAllUrls(); }
-  exists(u) { return this.mem.has(u) || this.cache.get(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, u).toString()) !== null; }
-  add(u) { this.mem.add(u); this.cache.put(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, u).toString(), '1', 21600); }
+  constructor(repo){this.repo=repo; this.cache=CacheService.getScriptCache(); try{this.mem=this._getAllUrls();}catch(e){this.mem=new Set();}}
+  exists(u){return this.mem.has(u)||this.cache.get(this._hash(u))!=null;}
+  add(u){this.mem.add(u); this.cache.put(this._hash(u),'1',21600);}
+  _hash(u){return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5,u).toString();}
+  _getAllUrls(){
+    const last=this.repo.dbSheet.getLastRow(); if(last<2)return new Set();
+    const v=this.repo.dbSheet.getRange(Math.max(2,last-2000),4,Math.min(last-1,2001),1).getValues();
+    return new Set(v.flat().map(String));
+  }
 }
 class RssService {
-  fetch(k, r, l) {
+  fetch(k,r,l){
     try {
-      const u = `https://news.google.com/rss/search?q=${encodeURIComponent(k)}&hl=${l}&gl=${r}&ceid=${r}:${l}`;
-      const xml = UrlFetchApp.fetch(u, {muteHttpExceptions:true}).getContentText();
-      const doc = XmlService.parse(xml);
-      return doc.getRootElement().getChild('channel').getChildren('item').map(i => ({
-        title: i.getChild('title').getText(),
-        link: i.getChild('link').getText(),
-        date: Utilities.formatDate(new Date(i.getChild('pubDate').getText()), 'Asia/Tokyo', 'MM/dd HH:mm'),
-        source: i.getChild('source') ? i.getChild('source').getText() : 'News'
-      }));
-    } catch(e) { return []; }
+      const u=`https://news.google.com/rss/search?q=${encodeURIComponent(k)}&hl=${l}&gl=${r}&ceid=${r}:${l}`;
+      const xml=UrlFetchApp.fetch(u,{muteHttpExceptions:true}).getContentText();
+      const items=XmlService.parse(xml).getRootElement().getChild('channel').getChildren('item');
+      return items.map(i=>({title:i.getChild('title').getText(),link:i.getChild('link').getText(),date:Utilities.formatDate(new Date(i.getChild('pubDate').getText()),'Asia/Tokyo','MM/dd'),source:i.getChild('source')?.getText()||'News'}));
+    }catch(e){return[];}
   }
 }
 class MailService {
-  sendDailyReport(a, s) { GmailApp.sendEmail(s.MailTo || Session.getActiveUser().getEmail(), 'News', `${a.length} articles`); }
+  constructor(l){this.logger=l;}
+  sendDailyReport(articles, settings){
+    const to = settings.MailTo || Session.getActiveUser().getEmail();
+    let html = '<h3>Daily News</h3>';
+    articles.forEach(a=>html+=`<p><a href="${a.link}">${a.title}</a><br><small>${a.source}</small></p>`);
+    GmailApp.sendEmail(to, 'News Briefing', '', {htmlBody:html});
+  }
 }
-function parseRegionList(s, f) { return (s||'').split(',').map(r=>r.trim().toUpperCase()).filter(r=>r) || f; }
