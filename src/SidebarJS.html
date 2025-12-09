@@ -1,103 +1,129 @@
 <script>
   let allArticles = [];
+  let currentTab = 'inbox'; // 'inbox' or 'archive'
 
-  window.onload = function() {
-    setupDate();
-    fetchData();
-  };
-
-  function setupDate() {
-    const now = new Date();
-    document.getElementById('date-display').textContent = now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  }
+  window.onload = () => { fetchData(); };
 
   function fetchData() {
-    google.script.run
-      .withSuccessHandler(onSuccess)
-      .withFailureHandler(onFailure)
-      .getNewsFeedData();
+    google.script.run.withSuccessHandler(data => {
+      allArticles = JSON.parse(data);
+      updateFilterOptions();
+      renderFeed();
+    }).getNewsFeedData();
   }
 
-  function onSuccess(jsonString) {
-    allArticles = JSON.parse(jsonString);
-    updateFilterOptions();
+  function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
     renderFeed();
-  }
-
-  function onFailure(e) {
-    document.getElementById('feed-container').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
   }
 
   function updateFilterOptions() {
     const select = document.getElementById('keyword-filter');
     const keywords = [...new Set(allArticles.map(a => a.keyword))].filter(Boolean);
-    keywords.forEach(kw => {
-      const option = document.createElement('option');
-      option.value = kw;
-      option.textContent = kw;
-      select.appendChild(option);
-    });
+    select.innerHTML = '<option value="ALL">All Topics</option>';
+    keywords.forEach(kw => select.innerHTML += `<option value="${kw}">${kw}</option>`);
   }
 
   function renderFeed() {
     const container = document.getElementById('feed-container');
-    const filterValue = document.getElementById('keyword-filter').value;
-    const filtered = filterValue === 'ALL' ? allArticles : allArticles.filter(a => a.keyword === filterValue);
+    const filterKw = document.getElementById('keyword-filter').value;
+    
+    // Filter Logic
+    // Inbox: isRead が false のもの
+    // Archive: isRead が true のもの
+    const filtered = allArticles.filter(a => {
+      const matchKw = filterKw === 'ALL' || a.keyword === filterKw;
+      const matchTab = currentTab === 'inbox' ? !a.isRead : a.isRead;
+      return matchKw && matchTab;
+    });
 
     if (filtered.length === 0) {
-      container.innerHTML = '<div class="empty">No articles found.</div>';
+      container.innerHTML = `<div class="loading">No articles in ${currentTab}.</div>`;
       return;
     }
 
-    const html = filtered.map((article, index) => {
-      const rating = article.rating || 0;
-      // 星のHTML生成 (5つ)
-      let starsHtml = '';
-      for (let i = 1; i <= 5; i++) {
-        const activeClass = i <= rating ? 'active' : '';
-        // リンククリックと競合しないよう event.preventDefault を仕込む
-        starsHtml += `<span class="star ${activeClass}" onclick="rateArticle(event, '${article.link}', ${i}, this)">★</span>`;
-      }
+    container.innerHTML = filtered.map((a, i) => createCardHtml(a, i)).join('');
+  }
 
-      return `
-        <a href="${article.link}" class="card">
-          <div class="card-meta">${escapeHtml(article.keyword)}</div>
-          <h2 class="card-title">${escapeHtml(article.title)}</h2>
-          <div class="card-info">
-            <span class="source-tag">${escapeHtml(article.source)}</span>
-            <span>${escapeHtml(article.date || '')}</span>
-          </div>
-          <div class="rating-area">
-            ${starsHtml}
-          </div>
-        </a>
-      `;
-    }).join('');
+  function createCardHtml(article, index) {
+    const rating = article.rating || 0;
+    const comment = article.comment || '';
+    const campaignBadge = article.campaignTag ? `<span class="campaign-badge">${article.campaignTag}</span>` : '';
     
-    container.innerHTML = html;
+    let stars = '';
+    for(let i=1; i<=5; i++) {
+      stars += `<span class="star ${i<=rating?'active':''}" onclick="setRating(event, '${article.link}', ${i})">★</span>`;
+    }
+
+    const archiveLabel = article.isRead ? 'Return to Inbox' : 'Mark as Read (Archive)';
+    const archiveClass = article.isRead ? 'read' : '';
+
+    return `
+      <div class="card" id="card-${index}">
+        ${campaignBadge}
+        <div class="card-meta">${article.keyword}</div>
+        <a href="${article.link}" target="_blank" class="card-title">${article.title}</a>
+        <div class="card-info"><span class="source-tag">${article.source}</span><span>${article.date}</span></div>
+        
+        <div class="actions" onclick="event.preventDefault();"> <div class="rating">${stars}</div>
+          
+          <textarea class="comment-box" placeholder="Memo..." onchange="saveComment('${article.link}', this.value)">${comment}</textarea>
+          
+          <div class="btn-row">
+            <button class="archive-btn ${archiveClass}" onclick="toggleRead('${article.link}', ${!article.isRead})">
+              ${archiveLabel}
+            </button>
+            <span class="save-status" id="status-${index}">Saved</span>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
-  // 評価送信処理
-  function rateArticle(event, link, rating, starElem) {
-    event.preventDefault(); // リンク遷移を止める
-    event.stopPropagation();
+  // --- API Actions ---
 
-    // UIの即時反映 (親要素内の全starを取得してクラス付け替え)
-    const parent = starElem.parentElement;
-    const stars = parent.querySelectorAll('.star');
-    stars.forEach((s, idx) => {
-      if (idx < rating) s.classList.add('active');
-      else s.classList.remove('active');
+  function setRating(e, link, rating) {
+    e.stopPropagation();
+    // UI Update
+    const parent = e.target.parentElement;
+    Array.from(parent.children).forEach((s, i) => {
+      s.classList.toggle('active', i < rating);
     });
-
-    // サーバー送信
-    google.script.run
-      .withFailureHandler(err => console.error(err))
-      .updateArticleRating(link, rating);
+    // Server Update
+    google.script.run.updateArticleStatus(link, { rating: rating });
   }
 
-  function escapeHtml(str) {
-    if(!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  function saveComment(link, text) {
+    google.script.run.withSuccessHandler(() => {
+       // Show saved indicator if needed
+    }).updateArticleStatus(link, { comment: text });
   }
+
+  function toggleRead(link, newState) {
+    // Optimistic UI Update: Remove from list immediately
+    allArticles = allArticles.map(a => a.link === link ? {...a, isRead: newState} : a);
+    renderFeed(); // Re-render to move item to other tab
+
+    google.script.run.updateArticleStatus(link, { isRead: newState });
+  }
+</script>
+
+<div class="ai-area" style="margin-top:8px; border-top:1px dotted #eee; padding-top:4px;">
+  <button class="ai-btn" onclick="getSummary(this, '${article.link}', '${escapeHtml(article.title)}')">✨ AI Summary</button>
+  <div class="summary-text" style="font-size:10px; color:#333; margin-top:4px; white-space: pre-wrap;">${article.summary || ''}</div>
+</div>
+
+<script>
+function getSummary(btn, link, title) {
+  const output = btn.nextElementSibling;
+  btn.disabled = true;
+  btn.innerText = 'Thinking...';
+  
+  google.script.run.withSuccessHandler(text => {
+    output.innerText = text;
+    btn.innerText = 'Done';
+  }).fetchSummary(link, title);
+}
 </script>
