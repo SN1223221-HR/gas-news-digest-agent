@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+  <style>
+    body { font-family: 'Roboto', sans-serif; color: #333; padding: 20px; }
+    .header { margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+    .chart-container { display: flex; gap: 20px; height: 300px; margin-bottom: 20px; }
+    .chart-box { flex: 1; border: 1px solid #eee; border-radius: 8px; padding: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .loading { text-align: center; margin-top: 100px; color: #999; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2>📊 Personalization Report</h2>
+  </div>
+  <div id="loading" class="loading">Loading...</div>
+  <div id="content" style="display:none;">
+    
+    <div class="chart-container">
+      <div id="piechart" class="chart-box"></div>
+      <div id="barchart" class="chart-box"></div>
+    </div>
+
+    <h3>🏆 Your Favorite Domains</h3>
+    <div class="chart-container">
+      <div id="domainchart" class="chart-box" style="flex: 2;"></div>
+    </div>
+  </div>
+
+  <script>
+    google.charts.load('current', {'packages':['corechart', 'bar']});
+    google.charts.setOnLoadCallback(init);
+
+    function init() {
+      google.script.run.withSuccessHandler(render).withFailureHandler(e => alert(e)).getAnalyticsData();
+    }
+
+    function render(json) {
+      const data = JSON.parse(json);
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('content').style.display = 'block';
+
+      // 1. Keyword Pie
+      const pieData = [['Keyword', 'Count']];
+      data.keywords.forEach(k => pieData.push([k.name, k.count]));
+      new google.visualization.PieChart(document.getElementById('piechart')).draw(
+        google.visualization.arrayToDataTable(pieData), { title: 'Topic Share' }
+      );
+
+      // 2. Keyword Bar
+      const barData = [['Keyword', 'Count', { role: 'style' }]];
+      data.keywords.slice(0,5).forEach((k,i) => barData.push([k.name, k.count, '#4285F4']));
+      new google.visualization.BarChart(document.getElementById('barchart')).draw(
+        google.visualization.arrayToDataTable(barData), { title: 'Top Keywords', legend: 'none' }
+      );
+
+      // 3. Domain Rating Bar (New)
+      if (data.domains && data.domains.length > 0) {
+        const domData = [['Domain', 'Avg Rating', 'Count']];
+        data.domains.forEach(d => domData.push([d.domain, parseFloat(d.avg), d.count]));
+        
+        // Material Chart for better look
+        const options = {
+          chart: { title: 'Highest Rated Sources', subtitle: 'Based on your 1-5 star ratings' },
+          bars: 'horizontal',
+          axes: { x: { 0: { side: 'top', label: 'Stars'} } },
+          colors: ['#f4b400']
+        };
+        new google.charts.Bar(document.getElementById('domainchart')).draw(
+          google.visualization.arrayToDataTable(domData), google.charts.Bar.convertOptions(options)
+        );
+      } else {
+        document.getElementById('domainchart').innerHTML = '<p style="padding:20px;color:#999">No ratings yet. Rate articles in the sidebar!</p>';
+      }
+    }
+  </script>
+</body>
+</html>
