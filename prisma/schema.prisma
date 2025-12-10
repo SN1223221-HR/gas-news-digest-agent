@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Article {
+  id          String   @id @default(cuid())
+  url         String   @unique
+  title       String
+  source      String
+  publishedAt DateTime
+  keyword     String
+  
+  // Status Flags
+  isRead      Boolean  @default(false)
+  isSent      Boolean  @default(false)
+  campaignTag String?  // Optional campaign association
+
+  // User Interaction
+  rating      Int      @default(0) // 0-5
+  comment     String?  @db.Text
+  summary     String?  @db.Text    // AI Summary
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([publishedAt])
+  @@index([rating])
+  @@index([isRead])
+}
+
+model Campaign {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  keywords  String[] // Array of strings (Postgres feature)
+  email     String
+  startDate DateTime
+  endDate   DateTime
+  isActive  Boolean  @default(true)
+}
+
+// Optional: Store search configuration in DB instead of code
+model SearchConfig {
+  id        String   @id @default("global")
+  keywords  String[]
+  regions   String[] @default(["JP", "US"])
+  language  String   @default("ja")
+}
