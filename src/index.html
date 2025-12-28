@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .sidebar-active { background-color: #f1f5f9; color: #1e40af; border-right: 4px solid #1e40af; }
+    .loading-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+  </style>
+</head>
+<body class="bg-[#f8fafc] text-slate-900">
+
+  <div class="flex min-h-screen">
+    <aside class="w-64 bg-white border-r border-slate-200 sticky top-0 h-screen hidden md:block">
+      <div class="p-6">
+        <h1 class="text-xl font-bold text-slate-800 tracking-tight">HR Insight</h1>
+        <p class="text-xs text-slate-400 mt-1 uppercase tracking-widest font-semibold">Strategic News</p>
+      </div>
+      <nav id="sidebar-nav" class="mt-4 px-3 space-y-1">
+        <button onclick="filterArticles('all')" id="btn-all" class="w-full text-left px-4 py-3 rounded-lg text-sm font-medium sidebar-active transition-all">
+          すべて表示
+        </button>
+        </nav>
+    </aside>
+
+    <main class="flex-1">
+      <header class="bg-white border-b border-slate-200 p-6 flex justify-between items-center">
+        <h2 id="current-category" class="text-lg font-semibold text-slate-700">最新の全記事</h2>
+        <div class="flex items-center space-x-4">
+          <span id="article-count" class="text-xs font-bold bg-slate-100 px-3 py-1 rounded-full text-slate-500">Loading...</span>
+          <button onclick="init()" class="text-slate-400 hover:text-slate-600 transition">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="loading-view" class="p-8 space-y-4">
+        <div class="h-32 bg-white rounded-xl shadow-sm loading-pulse"></div>
+        <div class="h-32 bg-white rounded-xl shadow-sm loading-pulse"></div>
+        <div class="h-32 bg-white rounded-xl shadow-sm loading-pulse"></div>
+      </div>
+
+      <div id="feed-container" class="p-8 grid grid-cols-1 lg:grid-cols-2 gap-6 hidden">
+        </div>
+    </main>
+  </div>
+
+  <script>
+    let rawData = { keywords: [], articles: [] };
+
+    function init() {
+      showLoading(true);
+      google.script.run
+        .withSuccessHandler(data => {
+          rawData = data;
+          renderSidebar();
+          filterArticles('all');
+          showLoading(false);
+        })
+        .getDashboardData();
+    }
+
+    function showLoading(isLoading) {
+      document.getElementById('loading-view').classList.toggle('hidden', !isLoading);
+      document.getElementById('feed-container').classList.toggle('hidden', isLoading);
+    }
+
+    function renderSidebar() {
+      const nav = document.getElementById('sidebar-nav');
+      const allBtn = document.getElementById('btn-all');
+      nav.innerHTML = '';
+      nav.appendChild(allBtn);
+
+      rawData.keywords.forEach(kw => {
+        const btn = document.createElement('button');
+        btn.className = "w-full text-left px-4 py-3 rounded-lg text-sm font-medium text-slate-500 hover:bg-slate-50 transition-all";
+        btn.id = `btn-${kw}`;
+        btn.textContent = kw;
+        btn.onclick = () => filterArticles(kw);
+        nav.appendChild(btn);
+      });
+    }
+
+    function filterArticles(kw) {
+      // UIの状態更新
+      document.querySelectorAll('#sidebar-nav button').forEach(b => b.classList.remove('sidebar-active'));
+      document.getElementById(`btn-${kw}`).classList.add('sidebar-active');
+      document.getElementById('current-category').textContent = kw === 'all' ? '最新の全記事' : `# ${kw}`;
+
+      const container = document.getElementById('feed-container');
+      const filtered = kw === 'all' 
+        ? rawData.articles 
+        : rawData.articles.filter(a => a.keyword === kw);
+
+      document.getElementById('article-count').textContent = `${filtered.length} 件の記事`;
+
+      container.innerHTML = filtered.map(a => `
+        <article class="bg-white p-6 rounded-xl shadow-sm border border-slate-100 hover:border-blue-200 hover:shadow-md transition-all group">
+          <div class="flex justify-between items-start mb-3">
+            <span class="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded tracking-wider uppercase">${a.keyword}</span>
+            <span class="text-xs text-slate-400 font-medium">${a.date}</span>
+          </div>
+          <h3 class="text-base font-bold text-slate-800 leading-snug group-hover:text-blue-600 transition-colors">
+            <a href="${a.link}" target="_blank" rel="noopener noreferrer">${a.title}</a>
+          </h3>
+          <div class="mt-4 pt-4 border-t border-slate-50 flex items-center justify-between text-xs text-slate-500">
+            <span class="font-semibold px-2 py-1 bg-slate-50 rounded italic">@ ${a.source}</span>
+            <button class="text-slate-300 hover:text-blue-500 transition-colors">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"></path></svg>
+            </button>
+          </div>
+        </article>
+      `).join('');
+    }
+
+    window.onload = init;
+  </script>
+</body>
+</html>
